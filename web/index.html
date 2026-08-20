@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Multi-Repository Code Search & Architecture Studio</title>
+  <meta name="description" content="Cross-repository code intelligence, AST semantic search, and symbol graph navigation.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="app-container">
+    <!-- Top Navigation Bar -->
+    <header class="app-header">
+      <div class="brand-group">
+        <div class="logo-icon">⚡</div>
+        <div class="brand-text">
+          <h1>Multi-Repo Code RAG</h1>
+          <span class="badge-openspec">OpenSpec SDD</span>
+        </div>
+      </div>
+
+      <div class="header-stats">
+        <div class="stat-item" title="Indexed Repositories">
+          <span class="stat-label">Repos</span>
+          <span class="stat-val" id="stat-repos">0</span>
+        </div>
+        <div class="stat-item" title="Indexed Source Files">
+          <span class="stat-label">Files</span>
+          <span class="stat-val" id="stat-files">0</span>
+        </div>
+        <div class="stat-item" title="LangChain Code Chunks">
+          <span class="stat-label">Chunks</span>
+          <span class="stat-val" id="stat-chunks">0</span>
+        </div>
+        <div class="stat-item" title="Extracted Symbols & Cross-Repo Links">
+          <span class="stat-label">Symbols</span>
+          <span class="stat-val" id="stat-symbols">0</span>
+        </div>
+      </div>
+
+      <div class="header-actions">
+        <button id="btn-open-add-repo" class="btn btn-primary btn-sm">
+          <span>+ Add Repository</span>
+        </button>
+        <button id="btn-theme-toggle" class="btn btn-ghost btn-icon" title="Toggle Theme">
+          🌓
+        </button>
+      </div>
+    </header>
+
+    <!-- Main Workspace Layout -->
+    <div class="workspace-layout">
+      <!-- Sidebar Navigation -->
+      <aside class="sidebar">
+        <nav class="nav-menu">
+          <button class="nav-tab active" data-tab="tab-search">
+            <span class="nav-icon">🔍</span>
+            <span class="nav-label">Hybrid Search</span>
+          </button>
+          <button class="nav-tab" data-tab="tab-repos">
+            <span class="nav-icon">📦</span>
+            <span class="nav-label">Repositories</span>
+          </button>
+          <button class="nav-tab" data-tab="tab-graph">
+            <span class="nav-icon">🕸️</span>
+            <span class="nav-label">Cross-Repo Graph</span>
+          </button>
+        </nav>
+
+        <div class="sidebar-filter-box">
+          <div class="filter-header">
+            <span>Filter Codebases</span>
+            <button id="btn-select-all-repos" class="btn-link">All</button>
+          </div>
+          <div id="repo-filter-list" class="repo-checkbox-list">
+            <div class="text-muted small">No repositories indexed yet.</div>
+          </div>
+
+          <div class="filter-header">
+            <span>Groups</span>
+          </div>
+          <div id="group-filter-list" class="repo-checkbox-list">
+            <div class="text-muted small">No groups created yet.</div>
+          </div>
+
+          <div class="scope-expand-controls">
+            <label>
+              <span>Expansion:</span>
+              <select id="scope-expand-select" class="select-sm">
+                <option value="none">None (Direct only)</option>
+                <option value="upstream">Upstream (Dependencies)</option>
+                <option value="downstream">Downstream (Dependents)</option>
+                <option value="both">Both (Bi-directional)</option>
+              </select>
+            </label>
+            <label>
+              <span>Depth:</span>
+              <select id="scope-expand-depth" class="select-sm">
+                <option value="1" selected>1 Hop</option>
+                <option value="2">2 Hops</option>
+                <option value="3">3 Hops</option>
+              </select>
+            </label>
+          </div>
+
+          <div id="scope-summary" class="scope-summary"></div>
+        </div>
+
+        <div class="sidebar-footer">
+          <div class="mcp-status-pill">
+            <span class="status-dot online"></span>
+            <span>MCP Server Ready</span>
+          </div>
+        </div>
+      </aside>
+
+      <!-- Main Content Area -->
+      <main class="main-content">
+        <!-- Tab 1: Repositories Management Hub -->
+        <section id="tab-repos" class="tab-pane">
+          <div class="pane-header">
+            <div>
+              <h2>Indexed Repositories & Relation Hub</h2>
+              <p class="text-muted">Manage connected codebases, repository groups, and dependency relations.</p>
+            </div>
+            <div class="pane-actions">
+              <button id="btn-open-groups-modal" class="btn btn-secondary">🏷️ Groups</button>
+              <button id="btn-sync-all" class="btn btn-secondary">🔄 Sync All</button>
+              <button id="btn-add-repo-hub" class="btn btn-primary">+ Add Repo</button>
+            </div>
+          </div>
+
+          <div id="repos-grid" class="repos-grid">
+            <!-- Rendered by JS -->
+          </div>
+        </section>
+
+        <!-- Tab 2: Cross-Repo Graph & Symbols -->
+        <section id="tab-graph" class="tab-pane">
+          <div class="pane-header">
+            <div>
+              <h2>Cross-Repository Graph & Symbol Map</h2>
+              <p class="text-muted">Explore caller-callee hierarchies and frontend-to-backend API linkages.</p>
+            </div>
+            <div class="search-box-inline">
+              <input type="text" id="symbol-search-input" placeholder="Search symbol or API path (e.g. login, /api/auth)..." class="input-text">
+              <button id="btn-search-symbol" class="btn btn-secondary">Inspect</button>
+            </div>
+          </div>
+
+          <div class="graph-views-split">
+            <div class="graph-card">
+              <h3>📡 Cross-Repository API Contracts</h3>
+              <p class="text-muted small">Client HTTP calls matched with Backend API route handlers</p>
+              <div id="cross-repo-api-table-wrapper" class="table-wrapper">
+                <table class="data-table">
+                  <thead>
+                    <tr>
+                      <th>Client Repo</th>
+                      <th>Call Site</th>
+                      <th>Target Endpoint</th>
+                      <th>Server Repo</th>
+                      <th>Handler Location</th>
+                    </tr>
+                  </thead>
+                  <tbody id="cross-repo-api-tbody">
+                    <tr><td colspan="5" class="text-center text-muted">Loading cross-repo links...</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <div class="graph-card">
+              <h3>🔍 Symbol Hierarchy & Callers</h3>
+              <div id="symbol-detail-view" class="symbol-detail-view">
+                <div class="text-muted text-center py-4">Search or click a symbol above to inspect callers and callees.</div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- Tab 3: Hybrid Search (Primary Query Experience) -->
+        <section id="tab-search" class="tab-pane active">
+          <div class="pane-header">
+            <div>
+              <h2>Hybrid Vector + Lexical Search</h2>
+              <p class="text-muted">Ranked code chunks with Reciprocal Rank Fusion (RRF).</p>
+            </div>
+          </div>
+          <div class="search-bar-hero">
+            <input type="text" id="hybrid-search-input" placeholder="Search exact keywords, function names, or conceptual topics..." class="input-text-lg">
+            <button id="btn-hybrid-search" class="btn btn-primary btn-lg">Search</button>
+          </div>
+          <div id="hybrid-results-list" class="search-results-list">
+            <div class="text-muted text-center py-8">Enter a search query to inspect hybrid vector + BM25 scores.</div>
+          </div>
+        </section>
+      </main>
+
+      <!-- Code Inspector Drawer (Right Side) -->
+      <aside id="code-drawer" class="code-drawer hidden">
+        <div class="drawer-header">
+          <div class="drawer-title-group">
+            <span class="drawer-repo-badge" id="drawer-repo-badge">repo</span>
+            <span class="drawer-file-path" id="drawer-file-path">path/to/file.ext</span>
+          </div>
+          <button id="btn-close-drawer" class="btn btn-ghost btn-icon">✕</button>
+        </div>
+        <div class="drawer-content">
+          <pre><code id="drawer-code-content"></code></pre>
+        </div>
+      </aside>
+    </div>
+
+    <!-- Modal: Add Repository -->
+    <div id="modal-add-repo" class="modal-overlay hidden">
+      <div class="modal-card">
+        <div class="modal-header">
+          <h3>Add Code Repository</h3>
+          <button id="btn-close-modal" class="btn btn-ghost btn-icon">✕</button>
+        </div>
+        <form id="add-repo-form">
+          <div class="form-group">
+            <label for="input-repo-id">Repository ID (Slug)</label>
+            <input type="text" id="input-repo-id" placeholder="e.g. backend-api" required class="input-text">
+          </div>
+          <div class="form-group">
+            <label for="input-repo-name">Display Name</label>
+            <input type="text" id="input-repo-name" placeholder="e.g. Backend API Microservice" class="input-text">
+          </div>
+          <div class="form-group">
+            <label>Source Type</label>
+            <div class="radio-group">
+              <label><input type="radio" name="source_type" value="local" checked> Local Filesystem Directory</label>
+              <label><input type="radio" name="source_type" value="git"> Remote Git URL</label>
+            </div>
+          </div>
+          <div class="form-group">
+            <label for="input-repo-path">Local Directory Path or Git URL</label>
+            <input type="text" id="input-repo-path" placeholder="/Users/name/projects/my-repo or https://github.com/org/repo.git" required class="input-text">
+          </div>
+          <div class="form-group" id="branch-group">
+            <label for="input-repo-branch">Branch (optional)</label>
+            <input type="text" id="input-repo-branch" value="main" class="input-text">
+          </div>
+          <div class="modal-footer">
+            <button type="button" id="btn-cancel-modal" class="btn btn-ghost">Cancel</button>
+            <button type="submit" id="btn-submit-repo" class="btn btn-primary">Index & Register</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <!-- Modal: Edit Repository / Switch Branch -->
+    <div id="modal-edit-repo" class="modal-overlay hidden">
+      <div class="modal-card">
+        <div class="modal-header">
+          <h3>Edit Repository & Branch</h3>
+          <button id="btn-close-edit-modal" class="btn btn-ghost btn-icon">✕</button>
+        </div>
+        <form id="edit-repo-form">
+          <input type="hidden" id="edit-repo-id">
+          <div class="form-group">
+            <label>Repository ID</label>
+            <input type="text" id="edit-repo-id-display" disabled class="input-text text-muted">
+          </div>
+          <div class="form-group">
+            <label for="edit-repo-name">Display Name</label>
+            <input type="text" id="edit-repo-name" required class="input-text">
+          </div>
+          <div class="form-group">
+            <label for="edit-repo-branch">Git Branch (e.g. main, dev, feature/pr-51)</label>
+            <input type="text" id="edit-repo-branch" class="input-text" placeholder="main">
+          </div>
+          <div class="form-group">
+            <label for="edit-repo-path">Git Remote URL or Local Path</label>
+            <input type="text" id="edit-repo-path" required class="input-text">
+          </div>
+          <div class="form-group">
+            <label class="checkbox-label">
+              <input type="checkbox" id="edit-auto-sync" checked>
+              <span>Synchronize and re-index immediately on save</span>
+            </label>
+          </div>
+          <div class="modal-footer">
+            <button type="button" id="btn-cancel-edit-modal" class="btn btn-ghost">Cancel</button>
+            <button type="submit" id="btn-submit-edit-repo" class="btn btn-primary">Save & Sync</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <!-- Modal: Manage Groups -->
+    <div id="modal-manage-groups" class="modal-overlay hidden">
+      <div class="modal-card modal-lg">
+        <div class="modal-header">
+          <h3>Repository Groups</h3>
+          <button id="btn-close-groups-modal" class="btn btn-ghost btn-icon">✕</button>
+        </div>
+        <div class="modal-body" style="padding: 20px;">
+          <form id="create-group-form" style="display: flex; gap: 10px; margin-bottom: 20px;">
+            <input type="text" id="new-group-name" placeholder="New group name (e.g. platform, billing)..." required class="input-text" style="flex: 1;">
+            <button type="submit" class="btn btn-primary btn-sm">+ Create Group</button>
+          </form>
+
+          <div id="groups-list-container">
+            <div class="text-muted">Loading groups...</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Modal: Add Dependency Edge -->
+    <div id="modal-add-dependency" class="modal-overlay hidden">
+      <div class="modal-card">
+        <div class="modal-header">
+          <h3>Declare Repository Dependency</h3>
+          <button id="btn-close-dep-modal" class="btn btn-ghost btn-icon">✕</button>
+        </div>
+        <form id="add-dep-form">
+          <input type="hidden" id="dep-source-repo">
+          <div class="form-group">
+            <label>Dependent Repository (Source)</label>
+            <input type="text" id="dep-source-repo-display" disabled class="input-text text-muted">
+          </div>
+          <div class="form-group">
+            <label for="dep-target-repo">Depends On (Target Repository)</label>
+            <select id="dep-target-repo" required class="input-text">
+              <!-- Options populated dynamically -->
+            </select>
+          </div>
+          <div class="modal-footer">
+            <button type="button" id="btn-cancel-dep-modal" class="btn btn-ghost">Cancel</button>
+            <button type="submit" id="btn-submit-dep" class="btn btn-primary">Add Dependency</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

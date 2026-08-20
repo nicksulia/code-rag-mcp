@@ -1,0 +1,20 @@
+{
+  "$schema": "https://openspec.dev/schema/v1/config.json",
+  "version": "1.0.0",
+  "project": {
+    "name": "multi-repo-code-rag",
+    "description": "Production-grade Retrieval-Augmented Generation for multi-repository codebases with LangChain code chunking, hybrid vector/BM25 retrieval, symbol graph traversal, MCP server, and interactive UI.",
+    "authors": ["Antigravity Engineering"],
+    "specDrivenDevelopment": {
+      "version": "1.0",
+      "specsDir": "openspec/specs",
+      "changesDir": "openspec/changes",
+      "archiveDir": "openspec/archive"
+    }
+  },
+  "standards": {
+    "codeFormatting": "black / ruff for Python, standard vanilla for JS/CSS",
+    "testingFramework": "pytest",
+    "documentationFormat": "markdown"
+  }
+}
