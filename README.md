@@ -121,6 +121,43 @@ Add this MCP server entry to your AI IDE configuration (Antigravity / Cursor / C
 }
 ```
 
+### 6. Connect over HTTP (MCP Streamable HTTP transport)
+
+The same MCP tool surface is also served over HTTP by the `serve` process at **`POST /mcp`** (stateless, JSON-response Streamable HTTP mode — no separate process or port):
+
+```bash
+python3 main.py serve --host 127.0.0.1 --port 8000
+
+curl -s http://127.0.0.1:8000/mcp \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-03-26"}}'
+```
+
+For HTTP-capable MCP clients, point them at the endpoint URL instead of spawning a subprocess:
+
+```json
+{
+  "mcpServers": {
+    "multi-repo-code-rag": {
+      "url": "http://127.0.0.1:8000/mcp"
+    }
+  }
+}
+```
+
+Transport behavior:
+
+- `POST /mcp` accepts exactly one JSON-RPC 2.0 message: requests get `200 application/json`; notifications and responses get `202 Accepted` with an empty body; non-JSON bodies get a `-32700` parse error; JSON-RPC batch arrays get `400`.
+- `GET /mcp` and `DELETE /mcp` return `405` — SSE streams and sessions are not offered in this iteration.
+- Protocol versions `2025-03-26` and `2024-11-05` are supported; `initialize` echoes the client's requested version when supported and falls back to the server's preferred version otherwise. The endpoint is stateless: no `initialize` handshake or `Mcp-Session-Id` header is required before calling tools.
+
+Security controls:
+
+- **Origin validation (DNS-rebinding protection):** browser requests whose `Origin` hostname is not `localhost`, `127.0.0.1`, `::1`, or the configured bind host are rejected with `403`. Requests without an `Origin` header (non-browser clients) are accepted. `/mcp` responses never carry `Access-Control-Allow-Origin` headers.
+- **Optional bearer auth:** pass `--mcp-token <token>` (or set `MCP_AUTH_TOKEN`) to require `Authorization: Bearer <token>` on every `/mcp` request; missing/invalid tokens get `401`. When binding a non-localhost host without a token, startup prints a loud warning — remote exposure belongs behind TLS or an SSH tunnel.
+
+Deferred to a future iteration: SSE streaming responses, server-initiated notifications, `Mcp-Session-Id` session management, resumability, and OAuth.
+
 ---
 
 ## 🧠 Embedding Model Runtime

@@ -145,6 +145,21 @@ The MCP Server implements the JSON-RPC 2.0 Model Context Protocol specification 
 
 ---
 
+### 2.10 `read_file`
+- **Description**: Return the full text content of a single file from a registered repository, equivalent to the REST endpoint `GET /api/v1/file`. Intended for targeted full-file reads after locating a file via search or symbol navigation. Missing or empty arguments return a structured error naming the missing argument. An unregistered repository, a nonexistent file, or a path that escapes the repository root (`..` segments or an absolute path) returns a structured "not found" error and never leaks filesystem paths outside the repository root.
+- **Arguments**:
+  - `repo_id` (`string`, **required**): The unique repository ID containing the file (e.g. `'update-api'`).
+  - `path` (`string`, **required**): The file path relative to the repository root (e.g. `'src/polling/usecase.py'`).
+- **Example Input**:
+  ```json
+  {
+    "repo_id": "update-api",
+    "path": "src/polling/usecase.py"
+  }
+  ```
+
+---
+
 ## 3. Protocol Guarantees
 - **JSON-RPC 2.0 Compliance**: All methods return `jsonrpc: "2.0"` envelope with unique transaction IDs.
 - **Safe Nullability**: Null, omitted, or empty dictionaries for `arguments` are gracefully accepted without runtime errors.

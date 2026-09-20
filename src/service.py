@@ -654,7 +654,16 @@ class MultiRepoRAGService:
         if not repo:
             return None
         root = self.repo_manager.get_repo_root_path(repo)
-        target = root / file_path
+        # Containment: reject absolute paths and `..` escapes so reads can
+        # never resolve outside the repository root.
+        if Path(file_path).is_absolute():
+            return None
+        try:
+            root_resolved = root.resolve()
+            target = (root_resolved / file_path).resolve()
+            target.relative_to(root_resolved)
+        except (OSError, ValueError):
+            return None
         if not target.exists() or not target.is_file():
             return None
         with open(target, "r", encoding="utf-8", errors="ignore") as f:

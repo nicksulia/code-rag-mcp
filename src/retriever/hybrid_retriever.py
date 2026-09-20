@@ -10,6 +10,7 @@ from ..models.schema import CodeChunk, SearchResult
 from ..indexer.vector_store import VectorStore
 from ..indexer.lexical_store import BM25LexicalStore
 from ..indexer.graph_store import GraphStore
+from .path_classifier import ChunkClass, classify
 
 logger = logging.getLogger("rag.retriever")
 
@@ -24,6 +25,9 @@ class HybridRetriever:
         dense_weight: float = 1.0,
         sparse_weight: float = 0.85,
         hop_decay: float = 0.85,
+        test_penalty: float = 0.65,
+        fixture_penalty: float = 0.5,
+        noise_penalty: float = 0.4,
     ):
         self.vector_store = vector_store
         self.lexical_store = lexical_store
@@ -32,6 +36,9 @@ class HybridRetriever:
         self.dense_weight = dense_weight
         self.sparse_weight = sparse_weight
         self.hop_decay = hop_decay
+        self.test_penalty = test_penalty
+        self.fixture_penalty = fixture_penalty
+        self.noise_penalty = noise_penalty
 
     def search(
         self,
@@ -110,6 +117,23 @@ class HybridRetriever:
                     chunk.symbol_name, owning_repo=chunk.repo_id
                 )
                 rrf += centrality
+
+            # Apply multiplicative class penalty (soft demotion of tests,
+            # fixtures, and noise) after boosts/centrality so it dampens
+            # them as well. Example* symbols are usage documentation and
+            # are treated as source.
+            chunk_class = classify(chunk.file_path)
+            penalty = {
+                ChunkClass.TEST: self.test_penalty,
+                ChunkClass.FIXTURE: self.fixture_penalty,
+                ChunkClass.NOISE: self.noise_penalty,
+            }.get(chunk_class, 1.0)
+            if chunk_class == ChunkClass.TEST and (chunk.symbol_name or "").startswith(
+                "Example"
+            ):
+                penalty = 1.0
+            if penalty != 1.0:
+                rrf *= penalty
 
             # Apply multiplicative hop decay penalty for expanded repositories (D5)
             if expanded_repos and chunk.repo_id in expanded_repos:

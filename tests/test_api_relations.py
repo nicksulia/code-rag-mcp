@@ -3,6 +3,7 @@ import json
 import io
 import tempfile
 import shutil
+import urllib.parse
 from pathlib import Path
 
 from src.service import MultiRepoRAGService
@@ -189,6 +190,45 @@ class TestAPIRelations(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIn("scope", body)
         self.assertEqual(sorted(body["scope"]["primary"]), ["repo-a", "repo-b"])
+
+    def test_get_file_endpoint(self):
+        # On-disk fixture: repo root inside temp dir, secret file outside it.
+        outside_dir = Path(self.temp_dir) / "outside"
+        outside_dir.mkdir()
+        (outside_dir / "secret.txt").write_text("top secret")
+        repo_root = outside_dir / "repo-f"
+        (repo_root / "src").mkdir(parents=True)
+        (repo_root / "src" / "hello.py").write_text("print('hello')\n")
+        self.service.repo_manager.register_repo(
+            "repo-f", "Repo F", "local", str(repo_root)
+        )
+
+        def get_file(repo_id, path):
+            qs = urllib.parse.urlencode({"repo_id": repo_id, "path": path})
+            return self._request("GET", f"/api/v1/file?{qs}")
+
+        # 1. Successful read returns 200 with {repo_id, file_path, content}
+        status, body = get_file("repo-f", "src/hello.py")
+        self.assertEqual(status, 200)
+        self.assertEqual(body["repo_id"], "repo-f")
+        self.assertEqual(body["file_path"], "src/hello.py")
+        self.assertEqual(body["content"], "print('hello')\n")
+
+        # 2. Parent-directory escape returns 404
+        status, body = get_file("repo-f", "../secret.txt")
+        self.assertEqual(status, 404)
+
+        # 3. Absolute path returns 404
+        status, body = get_file("repo-f", str(outside_dir / "secret.txt"))
+        self.assertEqual(status, 404)
+
+        # 4. Unknown repo returns 404
+        status, body = get_file("nope", "src/hello.py")
+        self.assertEqual(status, 404)
+
+        # 5. Missing params return 400
+        status, body = self._request("GET", "/api/v1/file")
+        self.assertEqual(status, 400)
 
 
 if __name__ == "__main__":

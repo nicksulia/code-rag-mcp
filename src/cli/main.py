@@ -424,9 +424,20 @@ def cmd_serve(service: MultiRepoRAGService, args):
     check_and_ensure_embedding_engine(
         service, auto_pull=getattr(args, "auto_pull", False)
     )
+    mcp_token = getattr(args, "mcp_token", None) or os.environ.get("MCP_AUTH_TOKEN")
+    if args.host not in ("127.0.0.1", "localhost", "::1") and not mcp_token:
+        print(
+            f"⚠️  WARNING: the MCP endpoint /mcp is reachable on non-localhost bind "
+            f"'{args.host}' with no auth token configured. Set --mcp-token or "
+            f"MCP_AUTH_TOKEN to require bearer authentication, and note that tokens "
+            f"sent over plain HTTP are visible to network sniffers — remote exposure "
+            f"belongs behind TLS or an SSH tunnel.",
+            file=sys.stderr,
+        )
     print(f"\n🚀 Starting Multi-Repository Code RAG Server...")
     print(f"   Web Dashboard: http://{args.host}:{args.port}")
     print(f"   REST API:      http://{args.host}:{args.port}/api/v1")
+    print(f"   MCP endpoint:  http://{args.host}:{args.port}/mcp")
     state = service.embedding_runtime_state()
     print(
         f"   Embedding:     {getattr(service.embedding_engine, 'model', 'subword')} "
@@ -440,7 +451,7 @@ def cmd_serve(service: MultiRepoRAGService, args):
         )
     print(f"   Press Ctrl+C to stop.\n")
 
-    start_server(service, host=args.host, port=args.port)
+    start_server(service, host=args.host, port=args.port, mcp_token=mcp_token)
 
 
 def cmd_update(service: MultiRepoRAGService, args):
@@ -651,6 +662,12 @@ def main():
     )
     p_serve.add_argument("--host", default="127.0.0.1")
     p_serve.add_argument("--port", type=int, default=8000)
+    p_serve.add_argument(
+        "--mcp-token",
+        default=None,
+        help="Bearer token required on the /mcp endpoint "
+        "(falls back to the MCP_AUTH_TOKEN environment variable)",
+    )
     p_serve.add_argument(
         "--auto-pull",
         action="store_true",

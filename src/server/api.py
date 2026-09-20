@@ -5,6 +5,7 @@ Provides JSON API endpoints, SSE streaming RAG responses, and static asset servi
 
 import os
 import json
+import secrets
 import urllib.parse
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
@@ -12,6 +13,7 @@ from pathlib import Path
 from typing import Dict, Any, Optional
 
 from ..service import MultiRepoRAGService, ReindexInProgressError
+from ..mcp.server import MCPServer
 from ..ingestion.repo_manager import (
     RelationError,
     UnknownRepositoryError,
@@ -26,11 +28,155 @@ class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
     daemon_threads = True
 
 
-def make_request_handler(service: MultiRepoRAGService, web_dir: Path):
+_LOCALHOST_NAMES = frozenset({"localhost", "127.0.0.1", "::1"})
+_WILDCARD_BIND_HOSTS = frozenset({"0.0.0.0", "::", ""})
+
+
+def make_request_handler(
+    service: MultiRepoRAGService,
+    web_dir: Path,
+    bind_host: str = "127.0.0.1",
+    mcp_token: Optional[str] = None,
+):
+    mcp_server = MCPServer(service=service)
+
+    # Origin hostnames accepted on /mcp: localhost variants plus the configured
+    # bind host when it is a concrete non-localhost address.
+    mcp_allowed_origin_hosts = set(_LOCALHOST_NAMES)
+    if bind_host not in _LOCALHOST_NAMES and bind_host not in _WILDCARD_BIND_HOSTS:
+        mcp_allowed_origin_hosts.add(bind_host.lower())
+
     class RAGAPIRequestHandler(BaseHTTPRequestHandler):
         def log_message(self, format, *args):
             # Suppress normal access logs to keep console clean
             pass
+
+        # --- MCP endpoint (/mcp) -----------------------------------------
+
+        def _send_mcp_json(
+            self,
+            status_code: int,
+            data: Any,
+            extra_headers: Optional[Dict[str, str]] = None,
+        ):
+            # Deliberately no Access-Control-Allow-Origin here: MCP responses
+            # must not be readable cross-origin by browsers.
+            body = json.dumps(data, indent=2).encode("utf-8")
+            self.send_response(status_code)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            for key, value in (extra_headers or {}).items():
+                self.send_header(key, value)
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _send_mcp_empty(self, status_code: int):
+            self.send_response(status_code)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def _mcp_origin_allowed(self) -> bool:
+            origin = self.headers.get("Origin")
+            if not origin:
+                # Non-browser clients do not send Origin.
+                return True
+            hostname = urllib.parse.urlparse(origin).hostname
+            if not hostname:
+                return False
+            return hostname.lower() in mcp_allowed_origin_hosts
+
+        def _mcp_auth_authorized(self) -> bool:
+            if not mcp_token:
+                return True
+            header = self.headers.get("Authorization") or ""
+            return secrets.compare_digest(header, f"Bearer {mcp_token}")
+
+        def _handle_mcp_post(self):
+            if not self._mcp_origin_allowed():
+                self._send_mcp_json(403, {"error": "Forbidden origin", "status": 403})
+                return
+            if not self._mcp_auth_authorized():
+                self._send_mcp_json(
+                    401,
+                    {"error": "Unauthorized", "status": 401},
+                    extra_headers={"WWW-Authenticate": "Bearer"},
+                )
+                return
+
+            content_len = int(self.headers.get("Content-Length", 0))
+            raw = (
+                self.rfile.read(content_len).decode("utf-8") if content_len > 0 else ""
+            )
+            try:
+                message = json.loads(raw)
+            except ValueError:
+                self._send_mcp_json(
+                    400,
+                    {
+                        "jsonrpc": "2.0",
+                        "id": None,
+                        "error": {"code": -32700, "message": "Parse error"},
+                    },
+                )
+                return
+
+            if isinstance(message, list):
+                # JSON-RPC batching was removed from the MCP spec in 2025-03-26.
+                self._send_mcp_json(
+                    400,
+                    {
+                        "jsonrpc": "2.0",
+                        "id": None,
+                        "error": {
+                            "code": -32600,
+                            "message": "JSON-RPC batch requests are not supported",
+                        },
+                    },
+                )
+                return
+
+            if not isinstance(message, dict):
+                self._send_mcp_json(
+                    400,
+                    {
+                        "jsonrpc": "2.0",
+                        "id": None,
+                        "error": {"code": -32600, "message": "Invalid Request"},
+                    },
+                )
+                return
+
+            if "method" not in message:
+                # JSON-RPC response or malformed notification: nothing to answer.
+                self._send_mcp_empty(202)
+                return
+
+            try:
+                response = mcp_server.handle_request(message)
+            except Exception as e:
+                self._send_mcp_json(
+                    500,
+                    {
+                        "jsonrpc": "2.0",
+                        "id": message.get("id"),
+                        "error": {"code": -32603, "message": f"Internal error: {e}"},
+                    },
+                )
+                return
+
+            if response is None:
+                self._send_mcp_empty(202)
+            else:
+                self._send_mcp_json(200, response)
+
+        def _send_mcp_method_not_allowed(self):
+            self._send_mcp_json(
+                405,
+                {"error": "Method Not Allowed", "status": 405},
+                extra_headers={"Allow": "POST"},
+            )
+
+        # --- REST API -----------------------------------------------------
 
         def _send_json(self, status_code: int, data: Any):
             body = json.dumps(data, indent=2).encode("utf-8")
@@ -61,6 +207,11 @@ def make_request_handler(service: MultiRepoRAGService, web_dir: Path):
             parsed_url = urllib.parse.urlparse(self.path)
             path = parsed_url.path
             query_params = urllib.parse.parse_qs(parsed_url.query)
+
+            if path == "/mcp":
+                # No SSE stream is offered in this iteration.
+                self._send_mcp_method_not_allowed()
+                return
 
             # API Routes
             if path == "/api/v1/repos":
@@ -139,6 +290,10 @@ def make_request_handler(service: MultiRepoRAGService, web_dir: Path):
         def do_POST(self):
             parsed_url = urllib.parse.urlparse(self.path)
             path = parsed_url.path
+
+            if path == "/mcp":
+                self._handle_mcp_post()
+                return
 
             content_len = int(self.headers.get("Content-Length", 0))
             post_data = (
@@ -348,6 +503,11 @@ def make_request_handler(service: MultiRepoRAGService, web_dir: Path):
             parsed_url = urllib.parse.urlparse(self.path)
             path = parsed_url.path
 
+            if path == "/mcp":
+                # No sessions exist to terminate in this iteration.
+                self._send_mcp_method_not_allowed()
+                return
+
             # DELETE /api/v1/groups/{name}/members/{repo_id}
             if path.startswith("/api/v1/groups/") and "/members/" in path:
                 parts = path.replace("/api/v1/groups/", "").split("/members/")
@@ -438,12 +598,15 @@ def start_server(
     host: str = "127.0.0.1",
     port: int = 8000,
     web_dir: Optional[Path] = None,
+    mcp_token: Optional[str] = None,
 ):
     if web_dir is None:
         web_dir = Path(__file__).resolve().parent.parent.parent / "web"
     web_dir.mkdir(parents=True, exist_ok=True)
 
-    handler = make_request_handler(service, web_dir)
+    handler = make_request_handler(
+        service, web_dir, bind_host=host, mcp_token=mcp_token
+    )
     server = ThreadedHTTPServer((host, port), handler)
     print(f"🚀 Multi-Repository Code RAG server listening on http://{host}:{port}")
     try:

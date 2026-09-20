@@ -7,6 +7,9 @@ from ..service import MultiRepoRAGService, resolve_data_dir
 
 logger = logging.getLogger("rag.mcp")
 
+# MCP protocol revisions this server speaks, most preferred first.
+SUPPORTED_PROTOCOL_VERSIONS = ("2025-03-26", "2024-11-05")
+
 
 TOOLS_SPEC = [
     {
@@ -192,6 +195,24 @@ TOOLS_SPEC = [
             },
         },
     },
+    {
+        "name": "read_file",
+        "description": "Read the full text content of a single known file from a registered repository. Intended for targeted full-file reads after locating the file via search or symbol navigation, not for bulk exploration.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "repo_id": {
+                    "type": "string",
+                    "description": "The unique repository ID containing the file (e.g. 'update-api').",
+                },
+                "path": {
+                    "type": "string",
+                    "description": "The file path relative to the repository root (e.g. 'src/polling/usecase.py').",
+                },
+            },
+            "required": ["repo_id", "path"],
+        },
+    },
 ]
 
 
@@ -207,11 +228,17 @@ class MCPServer:
         params = request.get("params", {})
 
         if method == "initialize":
+            requested = params.get("protocolVersion") if isinstance(params, dict) else None
+            protocol_version = (
+                requested
+                if requested in SUPPORTED_PROTOCOL_VERSIONS
+                else SUPPORTED_PROTOCOL_VERSIONS[0]
+            )
             return {
                 "jsonrpc": "2.0",
                 "id": msg_id,
                 "result": {
-                    "protocolVersion": "2024-11-05",
+                    "protocolVersion": protocol_version,
                     "capabilities": {"tools": {}},
                     "serverInfo": {"name": "multi-repo-code-rag", "version": "1.0.0"},
                 },
@@ -467,6 +494,22 @@ class MCPServer:
             if not repo_id:
                 raise ValueError("Missing required argument: 'repo_id'")
             return self.service.sync_repository(repo_id=repo_id, force=force)
+
+        elif tool_name == "read_file":
+            repo_id = args.get("repo_id")
+            if not repo_id:
+                raise ValueError("Missing required argument: 'repo_id'")
+            file_path = args.get("path")
+            if not file_path:
+                raise ValueError("Missing required argument: 'path'")
+            content = self.service.get_file_content(repo_id, file_path)
+            if content is None:
+                return {
+                    "error": "File not found",
+                    "repo_id": repo_id,
+                    "file_path": file_path,
+                }
+            return {"repo_id": repo_id, "file_path": file_path, "content": content}
 
         else:
             logger.warning(f"Unknown MCP tool requested: '{tool_name}'")
