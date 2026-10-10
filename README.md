@@ -1,232 +1,99 @@
 # ⚡ Multi-Repository Code Search Engine
 
-A production-grade code retrieval and search system engineered for querying and navigating multiple source code repositories simultaneously, designed and planned using the **[OpenSpec](https://github.com/Fission-AI/openspec)** Spec-Driven Development framework. Ranked results (with repository, file, line, symbol, and graph metadata) are the integration boundary for external cloud LLM clients, which perform generation in their own environment.
+Search across multiple code repositories at once, built for AI coding assistants. Connect over [MCP](#mcp) and call tools such as `search_codebases`, `get_symbol_definition`, `get_call_hierarchy` and `read_file`; results are ranked code chunks with repo, file, lines, symbol and caller/callee context. Repositories are registered and indexed with the [CLI](#cli) or the web UI. Specs live in `openspec/` ([OpenSpec](https://github.com/Fission-AI/openspec)).
 
----
+## Quick Start
 
-## 🌟 Key Features
+Requires Python 3 (standard library only) and [Ollama](https://ollama.com) for embeddings.
 
-1. **Multi-Repository Ingestion & Incremental Sync**:
-   - Manages local codebase directories and remote Git repositories.
-   - Respects `.gitignore` rules and excludes binaries/lockfiles automatically.
-   - SHA-256 hash tracking and Git commit detection for instantaneous incremental updates.
+1. Pull the embedding model:
 
-2. **AST-Aware Semantic Code Chunking**:
-   - Language-aware structural parsing for Python, TypeScript/JavaScript, Go, Rust, Java, C/C++, HTML/CSS, SQL, and Markdown.
-   - Preserves function, method, class, and interface boundaries.
-   - Injects scope headers (`// [Context] Repository | File | Scope | Imports | Doc`).
+   ```bash
+   ollama pull qwen3-embedding:0.6b
+   ```
 
-3. **Hybrid Dense + Lexical Indexing**:
-   - **Dense Vector Search**: Semantic subword feature vectors with cosine similarity + support for external embeddings (Gemini, OpenAI, Voyage AI, Ollama). Local Ollama embeddings default to `qwen3-embedding:0.6b`, loaded on demand and released when idle.
-   - **Sparse BM25 Search**: Code-tailored tokenizer splitting `camelCase` and `snake_case` tokens with symbol boosting.
-   - **Reciprocal Rank Fusion (RRF)**: Merges dense and sparse rankings with exact identifier boosts.
+2. Register and index your repositories, from a local directory or a git URL:
 
-4. **Symbol Graph & Cross-Repository Dependency Linkage**:
-   - Extracts symbol definitions, callers, callees, and imports in SQLite.
-   - Automatically maps **frontend client API calls** (e.g. `apiClient.post('/api/v1/auth/login')`) to **backend API route handlers** across different repositories.
+   ```bash
+   # Local directory
+   python3 main.py add my-app /abs/path/to/my-app
 
-5. **Interfaces**:
-   - **Modern Web UI**: Hybrid Search as the primary query experience, repository manager, cross-repo API contract map, and code inspector drawer.
-   - **Model Context Protocol (MCP) Server**: Exposes stdio tools (`search_codebases`, `get_symbol_definition`, `get_call_hierarchy`, `list_repositories`) to AI coding assistants (Antigravity, Cursor, Claude Code, Windsurf).
-   - **CLI**: Fast terminal commands for indexing and searching.
-   - **REST API**: `POST /api/v1/search` returns ranked code chunks for external cloud LLM consumers.
+   # Git repository (add --branch <name> for a non-default branch)
+   python3 main.py add nest git@github.com:nestjs/nest.git --type git
+   ```
 
----
+3. Check that search works:
 
-## 📂 OpenSpec Spec-Driven Planning
+   ```bash
+   python3 main.py search "login user authenticate"
+   ```
 
-All specifications, architectural contracts, and task breakdowns are maintained under `openspec/`:
+4. Start the server and keep it running (MCP endpoint and web UI at `http://127.0.0.1:8000`):
 
-```
-openspec/
-├── config.json                     # OpenSpec project configuration
-├── specs/                          # Living System Specifications (Source of Truth)
-│   ├── repository-management.md    # Repo ingestion & git tracking
-│   ├── ast-code-chunking.md        # AST semantic parsing & context injection
-│   ├── hybrid-indexing.md          # Dense vector + BM25 lexical index
-│   ├── symbol-graph-retrieval.md   # Call graph & cross-repo API linkage
-│   ├── context-fusion-reranking.md # RRF fusion & citation packaging
-│   ├── rag-generation.md           # LLM prompting & grounded citations
-│   ├── mcp-server.md               # Model Context Protocol tools
-│   └── api-and-web-ui.md           # REST & Web UI specifications
-└── changes/
-    └── 01-foundation-and-core-rag/ # Phase 1 Change Proposal
-        ├── proposal.md             # Goals, scope, and motivation
-        ├── design.md               # Technical architecture & contracts
-        └── tasks.md                # Implementation checklist (Completed)
-```
+   ```bash
+   python3 main.py serve
+   ```
 
----
+5. Add the server to your AI assistant's MCP config (Claude Code, Cursor, Windsurf, Antigravity, etc.) and restart the assistant:
 
-## 🚀 Quick Start
+   ```json
+   {
+     "mcpServers": {
+       "multi-repo-code-rag": { "url": "http://127.0.0.1:8000/mcp" }
+     }
+   }
+   ```
 
-### 1. Register & Index Repositories
+6. Ask the assistant a question about your code, e.g. "Use multi-repo-code-rag to find where users are authenticated."
 
-```bash
-# Add a local repository
-python3 main.py add auth-service ./fixtures/repo_auth_service
+## MCP
 
-# Add another repository
-python3 main.py add web-client ./fixtures/repo_web_client
+The assistant gets these tools from `POST /mcp` on the running `serve` process. Only one process may use the data directory at a time, so CLI commands fail while `serve` is running.
 
-# List all indexed repositories
-python3 main.py list
-```
+| Tool | Description |
+|---|---|
+| `search_codebases` | Hybrid search: `query`, `repos?`, `groups?`, `expand?`, `expand_depth?`, `limit?` |
+| `get_symbol_definition` | Definition, file, lines, docstring, code: `symbol_name`, `repo_id?` |
+| `get_call_hierarchy` | Callers and callees: `symbol_name`, `repo_id?` |
+| `get_cross_repo_api_links` | Frontend API calls linked to backend route handlers |
+| `list_repositories` | Repositories with counts, branch, sync status |
+| `update_repository` | Change branch, URL or name, optionally re-sync: `repo_id`, `branch?`, `url?`, `name?`, `auto_sync?` |
+| `sync_repository` | Incremental index: `repo_id`, `force?` |
+| `manage_repository_relations` | `action`: `create_group`, `delete_group`, `add_to_group`, `remove_from_group`, `add_dependency`, `remove_dependency`; plus `group?`, `repos?`, `repo?`, `depends_on?` |
+| `get_repository_relations` | Relations for `repo?`, or the whole graph |
+| `read_file` | Full file content: `repo_id`, `path` |
 
-### 2. Manage Repository Groups & Dependency Relations
+To require authentication, start the server with `--mcp-token <token>` (or set `MCP_AUTH_TOKEN`) and send `Authorization: Bearer <token>` on every request. When binding a non-localhost host, use a token and put the server behind TLS or an SSH tunnel.
 
-```bash
-# Create a repository group
-python3 main.py group create platform --repos auth-service shared-schemas
+## CLI
 
-# Declare a dependency edge: web-client depends on auth-service
-python3 main.py relation add web-client auth-service
+The CLI manages repositories, groups, dependencies and search. Run `python3 main.py --help` (or `<command> --help`) for all commands and options.
 
-# Inspect relations for a repository
-python3 main.py relation show web-client
+## Embedding Model
 
-# Search with group scoping and upstream dependency expansion
-python3 main.py search "jwt token" --group platform --expand upstream --expand-depth 1
-```
+The default model is `qwen3-embedding:0.6b` (override with `--embedding-model` or `$OLLAMA_EMBEDDING_MODEL`). Pull it with `ollama pull`, or pass `--auto-pull` to `serve` / `sync`. If Ollama is offline, a built-in encoder is used.
 
-### 3. Search Across Repositories (CLI)
+- **Memory**: the model loads on first use and is released after 30s idle. Change this with `--keep-alive` (`0`, a duration like `5m`, or `always`), or release it now with `python3 main.py unload`.
+- **Changing models**: affected repositories are re-embedded automatically, and searches are rejected until that finishes.
 
-```bash
-# Hybrid search across all codebases
-python3 main.py search "login user authenticate"
+## Configuration
 
-# Search scoped to a group with upstream dependency expansion
-python3 main.py search "How does authentication flow between web-client and auth-service?" --group platform --expand upstream
-```
+Flags apply to the CLI and `serve`; environment variables are the fallback.
 
-### 4. Launch the Interactive Web UI
+| Variable | Purpose |
+|---|---|
+| `RAG_DATA_DIR` | Data directory (default: project `data/`); `--data-dir` overrides |
+| `EMBEDDING_PROVIDER` | `ollama` (default), `subword`, `gemini`, `openai`, `unsloth` / `vllm`; `--embedding-provider` overrides |
+| `OLLAMA_HOST`, `OLLAMA_EMBEDDING_MODEL` | Ollama server (default `http://localhost:11434`) and model; `--ollama-host` / `--embedding-model` override |
+| `GEMINI_API_KEY`, `OPENAI_API_KEY` | Required for `gemini` / `openai`; without the key the `subword` encoder is used |
+| `UNSLOTH_URL` (or `OPENAI_BASE_URL`), `UNSLOTH_EMBEDDING_MODEL`, `UNSLOTH_API_KEY` | OpenAI-compatible embedding server for `unsloth` / `vllm` |
+| `EMBEDDING_KEEP_ALIVE` | Model residency policy; `--keep-alive` overrides |
+| `MCP_AUTH_TOKEN` | Bearer token required on `/mcp`; `--mcp-token` overrides |
+| `VERBOSE`, `LOG_LEVEL=DEBUG` | Debug logging |
 
-```bash
-python3 main.py serve --host 127.0.0.1 --port 8000
-```
-Open **[http://localhost:8000](http://localhost:8000)** in your browser.
-
-### 5. Connect to AI IDEs via MCP (Model Context Protocol)
-
-Add this MCP server entry to your AI IDE configuration (Antigravity / Cursor / Claude Code):
-
-```json
-{
-  "mcpServers": {
-    "multi-repo-code-rag": {
-      "command": "python3",
-      "args": ["/Users/nick-work-pc/.gemini/antigravity/scratch/multi-repo-code-rag/main.py", "mcp"]
-    }
-  }
-}
-```
-
-### 6. Connect over HTTP (MCP Streamable HTTP transport)
-
-The same MCP tool surface is also served over HTTP by the `serve` process at **`POST /mcp`** (stateless, JSON-response Streamable HTTP mode — no separate process or port):
-
-```bash
-python3 main.py serve --host 127.0.0.1 --port 8000
-
-curl -s http://127.0.0.1:8000/mcp \
-  -H 'Content-Type: application/json' \
-  -d '{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-03-26"}}'
-```
-
-For HTTP-capable MCP clients, point them at the endpoint URL instead of spawning a subprocess:
-
-```json
-{
-  "mcpServers": {
-    "multi-repo-code-rag": {
-      "url": "http://127.0.0.1:8000/mcp"
-    }
-  }
-}
-```
-
-Transport behavior:
-
-- `POST /mcp` accepts exactly one JSON-RPC 2.0 message: requests get `200 application/json`; notifications and responses get `202 Accepted` with an empty body; non-JSON bodies get a `-32700` parse error; JSON-RPC batch arrays get `400`.
-- `GET /mcp` and `DELETE /mcp` return `405` — SSE streams and sessions are not offered in this iteration.
-- Protocol versions `2025-03-26` and `2024-11-05` are supported; `initialize` echoes the client's requested version when supported and falls back to the server's preferred version otherwise. The endpoint is stateless: no `initialize` handshake or `Mcp-Session-Id` header is required before calling tools.
-
-Security controls:
-
-- **Origin validation (DNS-rebinding protection):** browser requests whose `Origin` hostname is not `localhost`, `127.0.0.1`, `::1`, or the configured bind host are rejected with `403`. Requests without an `Origin` header (non-browser clients) are accepted. `/mcp` responses never carry `Access-Control-Allow-Origin` headers.
-- **Optional bearer auth:** pass `--mcp-token <token>` (or set `MCP_AUTH_TOKEN`) to require `Authorization: Bearer <token>` on every `/mcp` request; missing/invalid tokens get `401`. When binding a non-localhost host without a token, startup prints a loud warning — remote exposure belongs behind TLS or an SSH tunnel.
-
-Deferred to a future iteration: SSE streaming responses, server-initiated notifications, `Mcp-Session-Id` session management, resumability, and OAuth.
-
----
-
-## 🧠 Embedding Model Runtime
-
-The engine runs as a **single instance per data directory** and keeps the local embedding model resident **only while it is working**.
-
-- **Default model**: `qwen3-embedding:0.6b` (install once with `ollama pull qwen3-embedding:0.6b`). Override with `--embedding-model` or `$OLLAMA_EMBEDDING_MODEL`.
-- **On-demand residency**: the model is never loaded at startup. It loads on the first embedding of an indexing run or search, and is released once the last in-flight operation finishes and the idle grace elapses. Overlapping requests share one load and produce one release.
-- **Residency policy** via `--keep-alive` or `$EMBEDDING_KEEP_ALIVE`:
-
-  | Value | Behavior |
-  |---|---|
-  | *(unset)* | Release after 30s of inactivity (default) |
-  | `0` | Release immediately after the last operation |
-  | `45s`, `5m` | Release after that idle grace |
-  | `always` | Keep the model resident for the process lifetime |
-
-- **Single instance**: startup takes an exclusive lock on `<data-dir>/.rag-instance.lock`. A second instance fails fast with the owning pid; pass `--allow-multi-instance` to downgrade this to a warning.
-- **Inspect / release manually**: `GET /api/v1/models/status` reports residency, active operations, policy, and index provenance. `POST /api/v1/models/unload` (or `python3 main.py unload`) releases the model, returning `409 busy` while an operation is in flight.
-
-### Automatic reindex on model change
-
-The dense index records the provider, model, and vector dimension that produced its vectors (`<data-dir>/index_meta.json`). When the configured embedding model changes — for example on upgrade from `qwen3-embedding:4b` (2560 dims) to the `qwen3-embedding:0.6b` default (1024 dims) — the affected repositories are **automatically re-embedded** before search results are served:
-
-- chunk text, symbol graph, and BM25 lexical index are preserved (embedding-only pass, not a re-parse);
-- progress is reported through the normal indexing progress output;
-- provenance is written per repository, so an interrupted rebuild resumes with the repositories still outstanding;
-- searches arriving during a rebuild get `503 reindexing` instead of being scored against vectors from another model.
-
-**Rollback to the previous behavior**: `OLLAMA_EMBEDDING_MODEL=qwen3-embedding:4b EMBEDDING_KEEP_ALIVE=always` restores the old model and always-resident policy; the provenance check then rebuilds back into the 4b vector space with no code change.
-
----
-
-## 🏷️ Repository Groups & Dependency Relations Architecture
-
-### Topology & Domain Rules
-- **Named Repository Groups**: Flat collections of repositories (e.g. `core`, `platform`, `billing`). Deleting a group never deletes underlying repositories.
-- **Directed Dependency DAG**: Explicit dependency edges `A -> depends on -> B`. Adding an edge runs write-time cycle detection (raising `DependencyCycleError` on cycles).
-- **Scope Resolution**: Combines explicit repository IDs and group members into a primary set, then expands along the graph in `upstream` (dependencies), `downstream` (dependents), or `both` directions up to `expand_depth`.
-- **Hop-Decay Ranking**: Chunks retrieved from expanded repositories receive a score multiplier penalty `(0.85 ** hops)` to ensure primary repositories rank first.
-- **Provenance Metadata**: Results originating from expanded repositories carry metadata (`repo_relation='expanded'`, `relation_direction`, `relation_hops`) and are visually badged in the UI.
-
-### REST API Endpoints
-
-| Method | Endpoint | Description |
-|---|---|---|
-| `GET` | `/api/v1/groups` | List all repository groups and their members |
-| `POST` | `/api/v1/groups` | Create a new repository group `{"name": "...", "repo_ids": [...]}` |
-| `DELETE` | `/api/v1/groups/{name}` | Delete a repository group |
-| `POST` | `/api/v1/groups/{name}/members` | Add members to group `{"repo_ids": [...]}` |
-| `DELETE` | `/api/v1/groups/{name}/members/{repo_id}` | Remove a member from a group |
-| `GET` | `/api/v1/models/status` | Embedding model residency, policy, and dense index provenance |
-| `POST` | `/api/v1/models/unload` | Release models now (`409` while an operation is in flight) |
-| `GET` | `/api/v1/repos/{repo_id}/relations` | Get repository groups, direct dependencies, and direct dependents |
-| `POST` | `/api/v1/repos/{repo_id}/dependencies` | Add dependency edge `{"depends_on": "..."}` |
-| `DELETE` | `/api/v1/repos/{repo_id}/dependencies/{target_id}` | Remove a dependency edge |
-| `POST` | `/api/v1/search` | Search with optional `groups`, `expand`, and `expand_depth` |
-
-### MCP Tools
-
-- `manage_repository_relations`: Actions `create_group`, `delete_group`, `add_to_group`, `remove_from_group`, `add_dependency`, `remove_dependency`.
-- `get_repository_relations`: Returns relations for a single repository or the entire relation graph.
-- `search_codebases`: Extended with optional `groups`, `expand`, and `expand_depth` arguments.
-
----
-
-## 🧪 Running Tests
+## Tests
 
 ```bash
 python3 -m unittest discover -s tests -p "test_*.py" -v
 ```
-All unit and integration test suites pass verifying AST chunking, symbol extraction, cross-repo API detection, repository relation DAG & cycle detection, scope resolution & hop-decay retrieval, REST API handlers, MCP protocol, and end-to-end hybrid search retrieval.
+
