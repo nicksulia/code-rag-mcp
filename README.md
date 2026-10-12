@@ -56,14 +56,14 @@ The assistant gets these tools from `POST /mcp` on the running `serve` process. 
 | `get_symbol_definition` | Definition, file, lines, docstring, code: `symbol_name`, `repo_id?` |
 | `get_call_hierarchy` | Callers and callees: `symbol_name`, `repo_id?` |
 | `get_cross_repo_api_links` | Frontend API calls linked to backend route handlers |
-| `list_repositories` | Repositories with counts, branch, sync status |
-| `update_repository` | Change branch, URL or name, optionally re-sync: `repo_id`, `branch?`, `url?`, `name?`, `auto_sync?` |
-| `sync_repository` | Incremental index: `repo_id`, `force?` |
+| `list_repositories` | Repositories with counts, branch, sync status and nullable `ssh_key_id` (no profile paths) |
+| `update_repository` | Change branch, URL, name or assignment, optionally re-sync: `repo_id`, `branch?`, `url?`, `name?`, `auto_sync?`, `ssh_key_id?` (string/null; omission preserves) |
+| `sync_repository` | Incremental index: `repo_id`, `force?`, `local_only?` (optional booleans) |
 | `manage_repository_relations` | `action`: `create_group`, `delete_group`, `add_to_group`, `remove_from_group`, `add_dependency`, `remove_dependency`; plus `group?`, `repos?`, `repo?`, `depends_on?` |
 | `get_repository_relations` | Relations for `repo?`, or the whole graph |
 | `read_file` | Full file content: `repo_id`, `path` |
 
-To require authentication, start the server with `--mcp-token <token>` (or set `MCP_AUTH_TOKEN`) and send `Authorization: Bearer <token>` on every request. When binding a non-localhost host, use a token and put the server behind TLS or an SSH tunnel.
+To require MCP authentication, start the server with `--mcp-token <token>` (or set `MCP_AUTH_TOKEN`) and send `Authorization: Bearer <token>` on every request. When binding a non-localhost host, use a token and put the server behind TLS or an SSH tunnel.
 
 ## CLI
 
@@ -97,3 +97,10 @@ Flags apply to the CLI and `serve`; environment variables are the fallback.
 python3 -m unittest discover -s tests -p "test_*.py" -v
 ```
 
+Browser UI checks (no dependencies; requires Chrome):
+
+```bash
+node tests/test_web_repo_sync.mjs                                       # macOS (default Chrome path)
+CHROME_BIN=/usr/bin/google-chrome node tests/test_web_repo_sync.mjs     # Linux / custom Chrome path
+$env:CHROME_BIN="C:\Program Files\Google\Chrome\Application\chrome.exe"; node tests/test_web_repo_sync.mjs   # Windows (PowerShell)
+```

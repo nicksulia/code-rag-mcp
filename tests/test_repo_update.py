@@ -11,6 +11,7 @@ from unittest.mock import patch, MagicMock
 from src.service import MultiRepoRAGService
 from src.mcp.server import MCPServer
 from src.models.schema import RepoSourceType, RepoStatus
+from src.ingestion.repo_manager import GitOperationError
 
 
 class TestRepositoryUpdate(unittest.TestCase):
@@ -93,7 +94,7 @@ class TestRepositoryUpdate(unittest.TestCase):
         self.assertEqual(repo.branch, "develop")
         self.assertEqual(repo.name, "MCP Updated Name")
 
-    @patch("subprocess.run")
+    @patch("src.ingestion.repo_manager.run_checked")
     def test_switch_git_branch_mock(self, mock_subprocess):
         mock_subprocess.return_value = MagicMock(
             returncode=0, stdout="Switched to branch 'staging'", stderr=""
@@ -120,6 +121,23 @@ class TestRepositoryUpdate(unittest.TestCase):
 
         self.assertTrue(ok)
         self.assertIsNone(err)
+
+    def test_git_update_failure_remains_typed_with_saved_configuration(self):
+        indexed = self.service.repo_manager.get_repo("test-repo")
+        indexed.source_type = RepoSourceType.GIT
+        self.service.repo_manager.save_repo(indexed)
+        error = GitOperationError("git_timeout", "fetch", "test-repo")
+        with patch.object(self.service.repo_manager, "switch_git_branch_or_url", side_effect=error), patch.object(self.service, "sync_repository") as sync:
+            with self.assertRaises(GitOperationError) as caught:
+                self.service.update_repository("test-repo", branch="feature", auto_sync=False)
+            self.assertTrue(caught.exception.config_saved)
+            self.assertEqual(caught.exception.code, "git_timeout")
+            sync.assert_not_called()
+        current = self.service.repo_manager.get_repo("test-repo")
+        self.assertEqual(current.branch, "feature")
+        self.assertEqual(current.status, RepoStatus.ERROR)
+        self.assertEqual(current.total_chunks, indexed.total_chunks)
+        self.assertEqual(current.last_synced_at, indexed.last_synced_at)
 
 
 if __name__ == "__main__":

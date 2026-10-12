@@ -286,6 +286,11 @@ class VectorStore:
             cursor.execute("SELECT DISTINCT repo_id FROM chunks_v2")
             return [row[0] for row in cursor.fetchall()]
 
+    def list_indexed_files(self) -> List[Tuple[str, str]]:
+        """Source paths represented by chunks, even before hash commit."""
+        with contextlib.closing(sqlite3.connect(str(self.db_path), timeout=30.0)) as conn:
+            return conn.execute("SELECT DISTINCT repo_id, file_path FROM chunks_v2").fetchall()
+
     def reembed_repo(
         self,
         repo_id: str,

@@ -4,6 +4,9 @@ import logging
 import traceback
 from typing import Dict, Any, List, Optional
 from ..service import MultiRepoRAGService, resolve_data_dir
+from ..ingestion.repo_manager import (
+    RepositoryOperationError, safe_operation_error, validate_sync_options,
+)
 
 logger = logging.getLogger("rag.mcp")
 
@@ -121,6 +124,10 @@ TOOLS_SPEC = [
                     "type": "boolean",
                     "description": "Whether to immediately check out the branch, pull, and re-index modified files (default: true).",
                 },
+                "ssh_key_id": {
+                    "type": ["string", "null"],
+                    "description": "Machine-local profile ID; null selects System SSH; omission preserves the assignment.",
+                },
             },
             "required": ["repo_id"],
         },
@@ -138,6 +145,10 @@ TOOLS_SPEC = [
                 "force": {
                     "type": "boolean",
                     "description": "Force full re-indexing of all files ignoring cache (default: false).",
+                },
+                "local_only": {
+                    "type": "boolean",
+                    "description": "Index an existing Git checkout without remote access or branch changes; returns indexed_local (default: false).",
                 },
             },
             "required": ["repo_id"],
@@ -263,7 +274,24 @@ class MCPServer:
                         ]
                     },
                 }
+            except RepositoryOperationError as error:
+                return {
+                    "jsonrpc": "2.0", "id": msg_id,
+                    "result": {
+                        "isError": True,
+                        "content": [{"type": "text", "text": json.dumps(error.to_dict(include_config_saved=tool_name == "update_repository"), indent=2)}],
+                    },
+                }
             except Exception as e:
+                if tool_name in {"sync_repository", "update_repository"}:
+                    safe = safe_operation_error(e, arguments.get("repo_id"))
+                    return {
+                        "jsonrpc": "2.0", "id": msg_id,
+                        "result": {
+                            "isError": True,
+                            "content": [{"type": "text", "text": json.dumps(safe.to_dict(), indent=2)}],
+                        },
+                    }
                 return {
                     "jsonrpc": "2.0",
                     "id": msg_id,
@@ -295,11 +323,26 @@ class MCPServer:
 
     def execute_tool(self, tool_name: str, args: Dict[str, Any]) -> Any:
         """Runs a tool with the embedding model held resident for its duration."""
+        if tool_name == "sync_repository":
+            validate_sync_options(args.get("force", False), args.get("local_only", False))
+        if tool_name == "update_repository" and "ssh_key_id" in args:
+            value = args["ssh_key_id"]
+            if value is not None and (not isinstance(value, str) or not value):
+                raise RepositoryOperationError("ssh_assignment_invalid", "save_configuration", config_saved=False)
+            try:
+                self.service.repo_manager.require_ssh_management()
+                if value is not None:
+                    self.service.repo_manager.get_ssh_key(value)
+            except Exception as error:
+                raise safe_operation_error(error, args.get("repo_id"), "save_configuration", False) from None
         with self.service.embedding_session(f"mcp:{tool_name}"):
             return self._execute_tool_impl(tool_name, args)
 
     def _execute_tool_impl(self, tool_name: str, args: Dict[str, Any]) -> Any:
-        logger.debug(f"MCP execute_tool: name='{tool_name}', args={args}")
+        if tool_name in {"sync_repository", "update_repository"}:
+            logger.debug("MCP repository operation: tool=%s", tool_name)
+        else:
+            logger.debug(f"MCP execute_tool: name='{tool_name}', args={args}")
         if tool_name == "search_codebases":
             query = args.get("query", "")
             repos = args.get("repos")
@@ -486,14 +529,17 @@ class MCPServer:
                 branch=branch,
                 name=name,
                 auto_sync=auto_sync,
+                assignment={"ssh_key_id": args["ssh_key_id"]} if "ssh_key_id" in args else None,
             )
 
         elif tool_name == "sync_repository":
             repo_id = args.get("repo_id")
             force = args.get("force", False)
+            local_only = args.get("local_only", False)
+            validate_sync_options(force, local_only)
             if not repo_id:
-                raise ValueError("Missing required argument: 'repo_id'")
-            return self.service.sync_repository(repo_id=repo_id, force=force)
+                raise RepositoryOperationError("repository_not_found")
+            return self.service.sync_repository(repo_id=repo_id, force=force, local_only=local_only)
 
         elif tool_name == "read_file":
             repo_id = args.get("repo_id")

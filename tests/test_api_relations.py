@@ -8,6 +8,7 @@ from pathlib import Path
 
 from src.service import MultiRepoRAGService
 from src.server.api import make_request_handler
+from http_fixture import attach_http_context
 
 
 class TestAPIRelations(unittest.TestCase):
@@ -54,6 +55,7 @@ class TestAPIRelations(unittest.TestCase):
         handler.send_response = fake_send_response
         handler.send_header = lambda k, v: None
         handler.end_headers = lambda: None
+        attach_http_context(handler)
 
         if method == "GET":
             handler.do_GET()

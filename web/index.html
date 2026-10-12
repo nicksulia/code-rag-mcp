@@ -68,6 +68,10 @@
             <span class="nav-icon">🕸️</span>
             <span class="nav-label">Cross-Repo Graph</span>
           </button>
+          <button class="nav-tab" data-tab="tab-ssh-keys">
+            <span class="nav-icon">🔑</span>
+            <span class="nav-label">SSH Keys</span>
+          </button>
         </nav>
 
         <div class="sidebar-filter-box">
@@ -127,15 +131,52 @@
               <p class="text-muted">Manage connected codebases, repository groups, and dependency relations.</p>
             </div>
             <div class="pane-actions">
+              <button id="btn-export-projects" class="btn btn-secondary">Export JSON</button>
+              <button id="btn-import-projects" class="btn btn-secondary">Import JSON</button>
               <button id="btn-open-groups-modal" class="btn btn-secondary">🏷️ Groups</button>
               <button id="btn-sync-all" class="btn btn-secondary">🔄 Sync All</button>
               <button id="btn-add-repo-hub" class="btn btn-primary">+ Add Repo</button>
             </div>
           </div>
 
+          <p id="project-transfer-status" class="transfer-status" role="status" aria-live="polite"></p>
+          <div class="repo-operation-results" role="status" aria-live="polite">
+            <p id="repo-operation-summary"></p>
+            <ul id="repo-operation-results"></ul>
+            <p id="repo-operation-refresh" class="is-error"></p>
+          </div>
+          <p class="text-muted small repo-sync-guidance">Sync contacts Git remotes. Index existing checkout is Git-only and performs no remote update or branch switch. A failed pre-index Git operation preserves the previous searchable index, not completed working-tree changes.</p>
           <div id="repos-grid" class="repos-grid">
             <!-- Rendered by JS -->
           </div>
+        </section>
+
+        <section id="tab-ssh-keys" class="tab-pane">
+          <div class="pane-header">
+            <div>
+              <h2>SSH Key References</h2>
+              <p class="text-muted">References only. Key files are never copied or deleted.</p>
+            </div>
+            <button id="btn-refresh-ssh-keys" class="btn btn-secondary">Refresh keys</button>
+          </div>
+          <p class="text-muted ssh-key-guidance">Use an absolute server-side path or <code>~/</code> to an OpenSSH private key with owner-only permissions.</p>
+          <details class="text-muted small ssh-key-help">
+            <summary>Authentication requirements</summary>
+            <p>POSIX only; keys must be owned by the server account. Unlock encrypted keys externally with <code>ssh-add</code>; the server must inherit <code>SSH_AUTH_SOCK</code>. System SSH uses the server's configuration and agent, not the browser's. Selected keys never fall back; proxy hops keep their own authentication. HTTP SSH access requires a loopback listener.</p>
+          </details>
+          <form id="ssh-key-form" class="ssh-key-register-form">
+            <div class="form-group">
+              <label for="ssh-key-name">Reference name</label>
+              <input id="ssh-key-name" class="input-text" maxlength="160" required autocomplete="off">
+            </div>
+            <div class="form-group">
+              <label for="ssh-key-path">Private-key path</label>
+              <input id="ssh-key-path" class="input-text" maxlength="4096" required autocomplete="off" placeholder="~/.ssh/id_ed25519">
+            </div>
+            <button id="btn-register-ssh-key" class="btn btn-primary" type="submit">Register reference</button>
+          </form>
+          <p id="ssh-key-status" class="transfer-status" role="status" aria-live="polite"></p>
+          <div id="ssh-key-list" class="repos-grid"></div>
         </section>
 
         <!-- Tab 2: Cross-Repo Graph & Symbols -->
@@ -215,6 +256,28 @@
       </aside>
     </div>
 
+    <!-- Modal: Import Configuration -->
+    <div id="modal-import-projects" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="import-projects-title">
+      <div class="modal-card modal-lg">
+        <div class="modal-header">
+          <h3 id="import-projects-title">Import repository configuration</h3>
+          <button id="btn-close-import" class="btn btn-ghost btn-icon" aria-label="Close import">✕</button>
+        </div>
+        <p class="text-muted small">Select a version 1 projects.json file (up to 1 MiB). Import adds configuration only: it does not clone or index code, replace existing repositories, or remove groups and dependencies.</p>
+        <p class="text-muted small">Local paths are machine-specific. Review them with Edit / Branch before using Sync. Git credentials must come from this machine's authentication setup. Exported files may contain private names and paths; share them carefully.</p>
+        <div class="form-group">
+          <label for="import-projects-file">Configuration JSON</label>
+          <input id="import-projects-file" type="file" accept=".json,application/json" class="input-text">
+        </div>
+        <p id="import-projects-status" class="transfer-status" role="status" aria-live="polite"></p>
+        <div id="import-projects-preview" class="transfer-preview"></div>
+        <div class="modal-footer">
+          <button id="btn-cancel-import" class="btn btn-ghost">Cancel</button>
+          <button id="btn-confirm-import" class="btn btn-primary" disabled>Import</button>
+        </div>
+      </div>
+    </div>
+
     <!-- Modal: Add Repository -->
     <div id="modal-add-repo" class="modal-overlay hidden">
       <div class="modal-card">
@@ -246,10 +309,16 @@
             <label for="input-repo-branch">Branch (optional)</label>
             <input type="text" id="input-repo-branch" value="main" class="input-text">
           </div>
+          <div class="form-group">
+            <label for="input-repo-ssh-key">SSH authentication</label>
+            <select id="input-repo-ssh-key" class="input-text"><option value="">System SSH (default)</option></select>
+            <p id="add-ssh-key-guidance" class="text-muted small"></p>
+          </div>
           <div class="modal-footer">
             <button type="button" id="btn-cancel-modal" class="btn btn-ghost">Cancel</button>
             <button type="submit" id="btn-submit-repo" class="btn btn-primary">Index & Register</button>
           </div>
+          <p id="add-repo-status" class="transfer-status" role="status" aria-live="polite"></p>
         </form>
       </div>
     </div>
@@ -285,10 +354,16 @@
               <span>Synchronize and re-index immediately on save</span>
             </label>
           </div>
+          <div class="form-group">
+            <label for="edit-repo-ssh-key">SSH authentication</label>
+            <select id="edit-repo-ssh-key" class="input-text"><option value="">System SSH (default)</option></select>
+            <p id="edit-ssh-key-guidance" class="text-muted small"></p>
+          </div>
           <div class="modal-footer">
             <button type="button" id="btn-cancel-edit-modal" class="btn btn-ghost">Cancel</button>
             <button type="submit" id="btn-submit-edit-repo" class="btn btn-primary">Save & Sync</button>
           </div>
+          <p id="edit-repo-status" class="transfer-status" role="status" aria-live="polite"></p>
         </form>
       </div>
     </div>

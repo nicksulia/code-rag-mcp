@@ -8,6 +8,8 @@ import time
 import threading
 import collections
 import logging
+import functools
+import hashlib
 from pathlib import Path
 from typing import List, Dict, Tuple, Optional, Any, Set
 
@@ -23,7 +25,10 @@ from .models.schema import (
     RepoGroup,
     RepoDependency,
 )
-from .ingestion.repo_manager import RepoManager
+from .ingestion.repo_manager import (
+    RepoManager, TransferSummary, RepositoryOperationError,
+    safe_operation_error, validate_sync_options, SSHAssignment, SSHKeyProfile,
+)
 from .parser.langchain_chunker import LangChainCodeChunker, ASTChunker
 from .parser.symbol_extractor import SymbolExtractor
 from .indexer.embeddings import (
@@ -44,6 +49,14 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_DATA_DIR = PROJECT_ROOT / "data"
 
 logger = logging.getLogger("rag.service")
+
+
+def _repository_operation(method):
+    @functools.wraps(method)
+    def operation(self, *args, **kwargs):
+        with self.repo_manager.git_operation():
+            return method(self, *args, **kwargs)
+    return operation
 
 
 def resolve_data_dir(data_dir: Optional[str] = None) -> str:
@@ -258,6 +271,22 @@ class MultiRepoRAGService:
         if self.instance_lock is not None:
             self.instance_lock.release()
 
+    def export_projects(self) -> bytes:
+        return self.repo_manager.export_projects()
+
+    def preview_project_import(self, document: Any) -> TransferSummary:
+        return self.repo_manager.preview_project_import(document)
+
+    def import_projects(self, document: Any) -> TransferSummary:
+        return self.repo_manager.import_projects(document)
+
+    def register_ssh_key(self, name: str, private_key_path: str) -> SSHKeyProfile:
+        self.repo_manager.require_ssh_management()
+        return self.repo_manager.register_ssh_key(
+            name, private_key_path, indexed_paths=self.vector_store.list_indexed_files(),
+        )
+
+    @_repository_operation
     def add_repository(
         self,
         repo_id: str,
@@ -266,18 +295,29 @@ class MultiRepoRAGService:
         url_or_path: str,
         branch: str = "main",
         auto_sync: bool = True,
+        assignment: Optional[SSHAssignment] = None,
     ) -> Repository:
-        repo = self.repo_manager.register_repo(
-            repo_id=repo_id,
-            name=name,
-            source_type=source_type,
-            url_or_path=url_or_path,
-            branch=branch,
-        )
-        if auto_sync:
-            self.sync_repository(repo_id)
-        return self.repo_manager.get_repo(repo_id) or repo
+        """Save registration before optional sync; failures report config_saved.
 
+        Configuration and a supplied machine-local assignment share one commit.
+        Successful return shape is unchanged. A pre-index Git failure preserves
+        indexed content but does not undo completed Git working-tree changes.
+        """
+        try:
+            repo = self.repo_manager.register_repo(
+                repo_id=repo_id, name=name, source_type=source_type,
+                url_or_path=url_or_path, branch=branch, assignment=assignment,
+            )
+        except Exception as error:
+            raise safe_operation_error(error, repo_id, "save_configuration", False) from None
+        try:
+            if auto_sync:
+                self.sync_repository(repo_id)
+            return self.repo_manager.get_repo(repo_id) or repo
+        except Exception as error:
+            raise safe_operation_error(error, repo.repo_id, "index", True) from None
+
+    @_repository_operation
     def update_repository(
         self,
         repo_id: str,
@@ -285,23 +325,45 @@ class MultiRepoRAGService:
         branch: Optional[str] = None,
         name: Optional[str] = None,
         auto_sync: bool = True,
+        assignment: Optional[SSHAssignment] = None,
     ) -> Dict[str, Any]:
-        """
-        Updates repository branch, URL/path, or display name, and optionally synchronizes.
-        """
-        resolved = self.resolve_repo_ids([repo_id])
-        canonical_id = resolved[0] if resolved else repo_id
+        """Save desired configuration and optionally index, with safe failures.
 
-        updated_repo = self.repo_manager.update_repo(
-            repo_id=canonical_id, url_or_path=url_or_path, branch=branch, name=name
-        )
-
+        An omitted assignment preserves; null explicitly selects System SSH.
+        auto_sync=False skips indexing, not existing Git branch/remote updates.
+        Errors distinguish a failed save from failed execution after a save.
+        """
+        try:
+            canonical_id = self._operation_repository(repo_id).repo_id
+            updated_repo = self.repo_manager.update_repo(
+                repo_id=canonical_id, url_or_path=url_or_path, branch=branch, name=name,
+                assignment=assignment,
+            )
+        except Exception as error:
+            safe = safe_operation_error(error, repo_id, "save_configuration")
+            if safe.config_saved is None:
+                safe.config_saved = False
+            raise safe from None
         sync_result = None
-        if auto_sync:
-            sync_result = self.sync_repository(canonical_id, force=False)
-            updated_repo = self.repo_manager.get_repo(canonical_id) or updated_repo
+        try:
+            if auto_sync:
+                sync_result = self.sync_repository(canonical_id, force=False)
+                updated_repo = self.repo_manager.get_repo(canonical_id) or updated_repo
+        except Exception as error:
+            raise safe_operation_error(error, canonical_id, "index", True) from None
 
         return {"repo": updated_repo.to_dict(), "sync_result": sync_result}
+
+    def _operation_repository(self, repo_id: str) -> Repository:
+        if not isinstance(repo_id, str) or not repo_id.strip():
+            raise RepositoryOperationError("repository_not_found")
+        repo = self.repo_manager.get_repo(repo_id)
+        if repo is None:
+            resolved = self.resolve_repo_ids([repo_id])
+            repo = self.repo_manager.get_repo(resolved[0]) if resolved else None
+        if repo is None:
+            raise RepositoryOperationError("repository_not_found", repo_id=repo_id)
+        return repo
 
     def resolve_repo_ids(self, repo_inputs: Optional[List[str]]) -> Optional[List[str]]:
         """
@@ -443,32 +505,53 @@ class MultiRepoRAGService:
 
         return ResolvedScope(primary=primary_repos, expanded=expanded_map)
 
+    @_repository_operation
     def sync_repository(
-        self, repo_id: str, force: bool = False, progress_callback: Optional[Any] = None
+        self, repo_id: str, force: bool = False, progress_callback: Optional[Any] = None,
+        local_only: bool = False,
     ) -> Dict[str, Any]:
-        """Indexes a repository, holding the embedding model resident for the run."""
-        with self.embedding_session(f"index:{repo_id}"):
-            result = self._sync_repository_impl(
-                repo_id=repo_id, force=force, progress_callback=progress_callback
-            )
-            self._record_provenance(result["repo_id"])
-            return result
+        """Index with boolean force/local_only; remote preparation is default.
+
+        force only controls scanning. Git local_only indexes actual cached HEAD,
+        returns indexed_local, and retains the last remote-sync time. Local
+        directories retain synced results. Pre-index Git failures preserve all
+        indexed state, persist safe errors, and never fall back automatically.
+        Standalone failures omit config_saved; working-tree changes are not
+        rolled back, and failures after index mutation are not atomic.
+        """
+        validate_sync_options(force, local_only)
+        canonical_id = None
+        try:
+            canonical_id = self._operation_repository(repo_id).repo_id
+            with self.embedding_session(f"index:{canonical_id}"):
+                result = self._sync_repository_impl(
+                    repo_id=canonical_id, force=force,
+                    progress_callback=progress_callback, local_only=local_only,
+                )
+                self._record_provenance(result["repo_id"])
+                return result
+        except Exception as error:
+            safe = safe_operation_error(error, canonical_id or repo_id, "index")
+            safe.config_saved = None
+            if canonical_id is not None:
+                try:
+                    current = self.repo_manager.get_repo(canonical_id)
+                    if current is not None:
+                        current.status = RepoStatus.ERROR
+                        current.error_message = str(safe)
+                        self.repo_manager.save_repo(current)
+                except Exception as save_error:
+                    raise safe_operation_error(save_error, canonical_id, "save_configuration") from None
+            raise safe from None
 
     def _sync_repository_impl(
-        self, repo_id: str, force: bool = False, progress_callback: Optional[Any] = None
+        self, repo_id: str, force: bool = False, progress_callback: Optional[Any] = None,
+        local_only: bool = False,
     ) -> Dict[str, Any]:
-        repo = self.repo_manager.get_repo(repo_id)
-        if not repo:
-            # Try to resolve by alias/URL
-            resolved_ids = self.resolve_repo_ids([repo_id])
-            if resolved_ids and resolved_ids[0] != repo_id:
-                repo = self.repo_manager.get_repo(resolved_ids[0])
-            if not repo:
-                raise ValueError(f"Repository '{repo_id}' not found.")
+        validate_sync_options(force, local_only)
+        repo = self._operation_repository(repo_id)
 
         repo_id = repo.repo_id
-        repo.status = RepoStatus.INDEXING
-        self.repo_manager.save_repo(repo)
 
         # Auto-heal: If chunks are 0, force full scan
         if self.vector_store.count_chunks(repo_id) == 0:
@@ -480,12 +563,17 @@ class MultiRepoRAGService:
             if repo.source_type == RepoSourceType.GIT:
                 if progress_callback:
                     progress_callback(0, 1, "Checking git repository status...", "git")
-                ok, err = self.repo_manager.clone_or_pull_git_repo(repo)
-                if not ok:
-                    raise RuntimeError(err)
+                if not local_only:
+                    self.repo_manager.clone_or_pull_git_repo(repo)
+                commit = self.repo_manager.inspect_existing_checkout(repo)
+            else:
+                commit = self.repo_manager.get_current_git_commit(
+                    self.repo_manager.get_repo_root_path(repo), repo.repo_id
+                )
 
+            repo.status = RepoStatus.INDEXING
+            self.repo_manager.save_repo(repo)
             root_path = self.repo_manager.get_repo_root_path(repo)
-            commit = self.repo_manager.get_current_git_commit(root_path)
             if commit:
                 repo.commit_hash = commit
 
@@ -516,18 +604,20 @@ class MultiRepoRAGService:
             all_edges = []
             current_hashes: Dict[str, Tuple[str, float, int]] = {}
             total_files = len(files_to_process)
+            protected_files = self.repo_manager.protected_files()
 
             for idx, rel_file in enumerate(files_to_process, start=1):
                 if progress_callback:
                     progress_callback(idx, total_files, rel_file, "chunk_and_embed")
 
                 full_path = root_path / rel_file
-                if not full_path.exists():
+                if not full_path.exists() or protected_files.contains(full_path):
                     continue
 
                 try:
-                    with open(full_path, "r", encoding="utf-8", errors="ignore") as f:
-                        content = f.read()
+                    with open(full_path, "rb") as f:
+                        file_bytes = f.read()
+                    content = file_bytes.decode("utf-8", errors="ignore").replace("\r\n", "\n").replace("\r", "\n")
 
                     chunks = self.chunker.chunk_file(repo_id, rel_file, content)
                     all_chunks.extend(chunks)
@@ -540,14 +630,11 @@ class MultiRepoRAGService:
                     all_edges.extend(edges)
 
                     stat = full_path.stat()
-                    import hashlib
-
-                    sha = hashlib.sha256(content.encode("utf-8")).hexdigest()
+                    sha = hashlib.sha256(file_bytes).hexdigest()
                     current_hashes[rel_file] = (sha, stat.st_mtime, stat.st_size)
 
-                except Exception as ex:
-                    print(f"Error processing file {rel_file}: {ex}")
-                    continue
+                except Exception as error:
+                    raise safe_operation_error(error, repo_id, "index") from None
 
             if progress_callback:
                 progress_callback(
@@ -569,7 +656,9 @@ class MultiRepoRAGService:
             repo.total_chunks = self.vector_store.count_chunks(repo_id)
             repo.total_symbols = self.graph_store.count_symbols(repo_id)
             repo.status = RepoStatus.READY
-            repo.last_synced_at = time.time()
+            indexed_local = local_only and repo.source_type == RepoSourceType.GIT
+            if not indexed_local:
+                repo.last_synced_at = time.time()
             repo.error_message = None
             self.repo_manager.save_repo(repo)
 
@@ -577,7 +666,7 @@ class MultiRepoRAGService:
 
             return {
                 "repo_id": repo_id,
-                "status": "synced",
+                "status": "indexed_local" if indexed_local else "synced",
                 "added_files": len(added_files),
                 "modified_files": len(modified_files),
                 "deleted_files": len(deleted_files),
@@ -587,11 +676,8 @@ class MultiRepoRAGService:
                 "elapsed_seconds": elapsed,
             }
 
-        except Exception as e:
-            repo.status = RepoStatus.ERROR
-            repo.error_message = str(e)
-            self.repo_manager.save_repo(repo)
-            raise e
+        except Exception as error:
+            raise safe_operation_error(error, repo_id, "index") from None
 
     def delete_repository(self, repo_id: str) -> bool:
         self.vector_store.delete_repo_chunks(repo_id)
@@ -662,9 +748,9 @@ class MultiRepoRAGService:
             root_resolved = root.resolve()
             target = (root_resolved / file_path).resolve()
             target.relative_to(root_resolved)
-        except (OSError, ValueError):
+        except (OSError, ValueError, RuntimeError):
             return None
-        if not target.exists() or not target.is_file():
+        if not target.exists() or not target.is_file() or self.repo_manager.protected_files().contains(target):
             return None
         with open(target, "r", encoding="utf-8", errors="ignore") as f:
             return f.read()

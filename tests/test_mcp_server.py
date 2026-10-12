@@ -9,6 +9,8 @@ import tempfile
 from pathlib import Path
 from src.service import MultiRepoRAGService
 from src.mcp.server import MCPServer
+from test_ssh_keys import generate_key
+from unittest.mock import patch
 
 
 class TestMCPServer(unittest.TestCase):
@@ -58,6 +60,34 @@ class TestMCPServer(unittest.TestCase):
         self.assertIn("manage_repository_relations", tool_names)
         self.assertIn("get_repository_relations", tool_names)
         self.assertIn("read_file", tool_names)
+        schema = next(tool["inputSchema"] for tool in tools if tool["name"] == "update_repository")
+        self.assertEqual(schema["properties"]["ssh_key_id"]["type"], ["string", "null"])
+        self.assertFalse(any("ssh_key" in name for name in tool_names))
+
+    def test_assignment_metadata_and_omitted_null_string_update_semantics(self):
+        profile = self.service.repo_manager.register_ssh_key(
+            "Fixture", str(generate_key(self.test_dir.resolve() / "fixture-key")),
+        )
+        self.service.add_repository("ssh", "SSH", "git", "git@fixture.invalid:repo", auto_sync=False,
+                                    assignment={"ssh_key_id": profile["key_id"]})
+        for values, expected in (
+            ({"ssh_key_id": profile["key_id"]}, profile["key_id"]),
+            ({}, profile["key_id"]), ({"ssh_key_id": None}, None),
+        ):
+            response = self._call_tool("update_repository", {"repo_id": "ssh", "auto_sync": False, **values})
+            self.assertFalse(response.get("isError", False), response)
+            data = json.loads(response["content"][0]["text"])
+            self.assertEqual(data["repo"]["ssh_key_id"], expected)
+            self.assertNotIn(profile["private_key_path"], repr(response))
+        for value in (False, 1, [], {}, ""):
+            with patch.object(self.service, "embedding_session") as session:
+                response = self._call_tool("update_repository", {"repo_id": "ssh", "ssh_key_id": value})
+                self.assertTrue(response["isError"])
+                self.assertEqual(json.loads(response["content"][0]["text"])["code"], "ssh_assignment_invalid")
+                session.assert_not_called()
+        listed = self._call_tool("list_repositories")
+        self.assertNotIn(profile["private_key_path"], repr(listed))
+        self.assertIn("ssh_key_id", repr(listed))
 
     def test_initialize_protocol_version_negotiation(self):
         # Supported 2025-03-26 is echoed back

@@ -13,6 +13,7 @@ from ..indexer.embeddings import DEFAULT_OLLAMA_EMBEDDING_MODEL
 from ..instance_lock import InstanceLockError
 from ..server.api import start_server
 from ..mcp.server import run_mcp_server
+from ..ingestion.repo_manager import RepositoryOperationError, safe_operation_error
 
 
 def print_banner():
@@ -88,20 +89,36 @@ def check_and_ensure_embedding_engine(
                     )
 
 
-def cmd_add(service: MultiRepoRAGService, args):
-    print(f"Registering repository '{args.repo_id}' from '{args.path}'...")
-    repo = service.add_repository(
-        repo_id=args.repo_id,
-        name=args.name or args.repo_id,
-        source_type=args.type,
-        url_or_path=args.path,
-        branch=args.branch,
-        auto_sync=not args.no_sync,
-    )
+def print_repository_failure(error: Exception, repo_id=None, configuration_operation=False):
+    safe = safe_operation_error(error, repo_id)
+    context = f" [{safe.code}" + (f", {safe.phase}" if safe.phase else "") + "]"
+    print(f"❌ Repository operation failed{context}: {safe}", file=sys.stderr)
+    if configuration_operation and safe.config_saved is True:
+        print("   Configuration saved; execution failed. Find the saved entry in the catalog to correct or retry it.", file=sys.stderr)
+    elif configuration_operation and safe.config_saved is False:
+        print("   Configuration was not saved.", file=sys.stderr)
+
+
+def cmd_add(service: MultiRepoRAGService, args) -> int:
+    print("Registering repository...")
+    try:
+        repo = service.add_repository(
+            repo_id=args.repo_id,
+            name=args.name or args.repo_id,
+            source_type=args.type,
+            url_or_path=args.path,
+            branch=args.branch,
+            auto_sync=not args.no_sync,
+            assignment={"ssh_key_id": args.ssh_key} if getattr(args, "ssh_key", None) is not None else None,
+        )
+    except Exception as error:
+        print_repository_failure(error, configuration_operation=True)
+        return 1
     print(f"✅ Repository registered: {repo.name} ({repo.status.value})")
     print(
         f"   Indexed files: {repo.total_files} | Chunks: {repo.total_chunks} | Symbols: {repo.total_symbols}"
     )
+    return 0
 
 
 def render_progress_bar(current: int, total: int, filename: str, phase: str):
@@ -119,13 +136,17 @@ def render_progress_bar(current: int, total: int, filename: str, phase: str):
         sys.stdout.write("\n")
 
 
-def cmd_sync(service: MultiRepoRAGService, args):
-    repos = service.list_repositories()
+def cmd_sync(service: MultiRepoRAGService, args) -> int:
+    try:
+        repos = service.list_repositories()
+    except Exception as error:
+        print_repository_failure(error)
+        return 1
     if not repos:
         print(
             "No repositories registered. Use `python3 main.py add <id> <path>` first."
         )
-        return
+        return 1 if args.repo_id not in (None, "all", "*") else 0
 
     target_repo_id = (
         None
@@ -166,44 +187,49 @@ def cmd_sync(service: MultiRepoRAGService, args):
                 if 0 <= choice_idx < len(repos):
                     target_repo_id = repos[choice_idx].repo_id
                 else:
-                    target_repo_id = None
-        except (KeyboardInterrupt, EOFError):
+                    print("❌ Invalid repository selection.", file=sys.stderr)
+                    return 1
+        except (KeyboardInterrupt, EOFError, ValueError):
             print("\nAborted.")
-            return
+            return 1
 
     if target_repo_id:
-        resolved = service.resolve_repo_ids([target_repo_id])
-        matched_repo = (
-            service.repo_manager.get_repo(resolved[0])
-            if resolved
-            else service.repo_manager.get_repo(target_repo_id)
-        )
-        if not matched_repo:
-            print(
-                f"❌ Repository '{target_repo_id}' not found. Run `python3 main.py list` to see available repositories."
+        try:
+            resolved = service.resolve_repo_ids([target_repo_id])
+            matched_repo = (
+                service.repo_manager.get_repo(resolved[0])
+                if resolved
+                else service.repo_manager.get_repo(target_repo_id)
             )
-            return
+        except Exception as error:
+            print_repository_failure(error)
+            return 1
+        if not matched_repo:
+            print_repository_failure(RepositoryOperationError("repository_not_found"))
+            return 1
         target_list = [matched_repo]
     else:
         target_list = repos
 
+    succeeded = failed = 0
     for r in target_list:
         if not r:
             continue
-        print(f"\n⚡ Synchronizing: {r.repo_id} ({r.url_or_path})")
-        print(
-            f"   Model: {getattr(service.embedding_engine, 'model', 'subword')} (dim={service.embedding_engine.dimension})"
-        )
-
+        print(f"\n⚡ Indexing: {r.repo_id}")
         try:
+            print(
+                f"   Model: {getattr(service.embedding_engine, 'model', 'subword')} (dim={service.embedding_engine.dimension})"
+            )
             res = service.sync_repository(
                 repo_id=r.repo_id,
                 force=getattr(args, "force", False),
                 progress_callback=render_progress_bar,
+                local_only=getattr(args, "local_only", False),
             )
-            print(f"\n┌────────────────────────────────────────────────────────────┐")
-            print(f"│ ✅ Sync Complete: {r.repo_id:<41}│")
-            print(f"├────────────────────────────────────────────────────────────┤")
+            label = "Checkout Indexed (no remote update)" if res["status"] == "indexed_local" else "Sync Complete"
+            print("\n┌────────────────────────────────────────────────────────────┐")
+            print(f"│ ✅ {label}: {r.repo_id}")
+            print("├────────────────────────────────────────────────────────────┤")
             print(
                 f"│ 📦 Files Indexed   : {res['added_files'] + res['modified_files']} updated / {r.total_files} total files{' ':<16}│"
             )
@@ -212,9 +238,14 @@ def cmd_sync(service: MultiRepoRAGService, args):
             )
             print(f"│ 🕸️ Extracted Symbols: {res['total_symbols']} symbols{' ':<31}│")
             print(f"│ ⏱️ Elapsed Time    : {res['elapsed_seconds']}s{' ':<38}│")
-            print(f"└────────────────────────────────────────────────────────────┘")
-        except Exception as e:
-            print(f"\n❌ Sync failed for {r.repo_id}: {str(e)}")
+            print("└────────────────────────────────────────────────────────────┘")
+            succeeded += 1
+        except Exception as error:
+            failed += 1
+            print(f"\nRepository: {r.repo_id}", file=sys.stderr)
+            print_repository_failure(error, r.repo_id)
+    print(f"\nResults: {succeeded} succeeded, {failed} failed.")
+    return 1 if failed else 0
 
 
 def cmd_list(service: MultiRepoRAGService, args):
@@ -454,8 +485,8 @@ def cmd_serve(service: MultiRepoRAGService, args):
     start_server(service, host=args.host, port=args.port, mcp_token=mcp_token)
 
 
-def cmd_update(service: MultiRepoRAGService, args):
-    print(f"🔄 Updating repository '{args.repo_id}'...")
+def cmd_update(service: MultiRepoRAGService, args) -> int:
+    print("🔄 Updating repository...")
     try:
         res = service.update_repository(
             repo_id=args.repo_id,
@@ -463,12 +494,13 @@ def cmd_update(service: MultiRepoRAGService, args):
             branch=args.branch,
             name=args.name,
             auto_sync=not args.no_sync,
+            assignment=({"ssh_key_id": None} if getattr(args, "system_ssh", False)
+                        else {"ssh_key_id": args.ssh_key} if getattr(args, "ssh_key", None) is not None else None),
         )
         repo_data = res["repo"]
-        print(f"✅ Repository '{args.repo_id}' updated successfully!")
+        print(f"✅ Repository '{repo_data['repo_id']}' updated successfully!")
         print(f"   Name        : {repo_data['name']}")
         print(f"   Branch      : {repo_data['branch']}")
-        print(f"   URL / Path  : {repo_data['url_or_path']}")
         print(
             f"   Total Files : {repo_data['total_files']} | Chunks: {repo_data['total_chunks']} | Symbols: {repo_data['total_symbols']}"
         )
@@ -477,8 +509,10 @@ def cmd_update(service: MultiRepoRAGService, args):
             print(
                 f"   Sync Status : {sync_r['status']} ({sync_r.get('added_files', 0)} added, {sync_r.get('modified_files', 0)} modified)"
             )
-    except Exception as e:
-        print(f"❌ Failed to update repository '{args.repo_id}': {e}")
+        return 0
+    except Exception as error:
+        print_repository_failure(error, configuration_operation=True)
+        return 1
 
 
 def cmd_unload(service: MultiRepoRAGService, args):
@@ -552,6 +586,7 @@ def main():
     p_add.add_argument("--type", choices=["local", "git"], default="local")
     p_add.add_argument("--branch", default="main")
     p_add.add_argument("--no-sync", action="store_true", help="Do not sync immediately")
+    p_add.add_argument("--ssh-key", help="Machine-local SSH profile ID (SSH Git remotes only)")
 
     # update
     p_update = subparsers.add_parser(
@@ -561,6 +596,9 @@ def main():
     p_update.add_argument("--branch", "-b", help="New Git branch to switch to")
     p_update.add_argument("--url", "-u", help="New Git remote URL or local path")
     p_update.add_argument("--name", "-n", help="New display name")
+    authentication = p_update.add_mutually_exclusive_group()
+    authentication.add_argument("--ssh-key", help="Assign a machine-local SSH profile ID")
+    authentication.add_argument("--system-ssh", action="store_true", help="Clear the assignment and use inherited system SSH")
     p_update.add_argument(
         "--no-sync",
         action="store_true",
@@ -588,6 +626,10 @@ def main():
     )
     p_sync.add_argument(
         "-f", "--force", action="store_true", help="Force full re-indexing of all files"
+    )
+    p_sync.add_argument(
+        "--local-only", action="store_true",
+        help="Index an existing Git checkout without remote access or branch changes",
     )
     p_sync.add_argument(
         "--auto-pull",
@@ -717,13 +759,14 @@ def main():
         print(f"❌ {e}")
         sys.exit(1)
 
+    exit_code = 0
     try:
         if args.command == "add":
-            cmd_add(service, args)
+            exit_code = cmd_add(service, args)
         elif args.command == "update":
-            cmd_update(service, args)
+            exit_code = cmd_update(service, args)
         elif args.command == "sync":
-            cmd_sync(service, args)
+            exit_code = cmd_sync(service, args)
         elif args.command == "list":
             cmd_list(service, args)
         elif args.command == "group":
@@ -741,6 +784,8 @@ def main():
     finally:
         # Release the embedding model and the instance lock on exit.
         service.shutdown()
+    if exit_code:
+        sys.exit(exit_code)
 
 
 if __name__ == "__main__":

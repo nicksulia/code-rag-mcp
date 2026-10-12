@@ -124,6 +124,7 @@ class Repository:
     status: RepoStatus = RepoStatus.READY
     last_synced_at: Optional[float] = None
     error_message: Optional[str] = None
+    ssh_key_id: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         d = asdict(self)
